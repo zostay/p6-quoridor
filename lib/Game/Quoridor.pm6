@@ -237,34 +237,46 @@ class Server {
     has Str $.host = 'localhost';
     has Int $.port = 9999;
 
-    has SetHash $!names;
+    has SetHash $!names .= new;
     has %!games;
     has @!finished-games;
 
     my class Game { ... }
 
     my class Client {
+        my $NEXT-CONNECTION-NUMBER = 1;
+
         has Str $.name;
-        has Str $.type;
+        has Str $.type = 'client';
+        has Int $.connection-number;
         has Int $.num;
         has Game $.game;
         has $.conn;
 
-        method title() { "{$.type.tc} #$!num" }
+        submethod BUILD() {
+            $!connection-number = $NEXT-CONNECTION-NUMBER++;
+        }
 
-        method says($message) { qq[$.title says, "$message"] }
-        method acts($message) { qq[$.title $message] }
+        method title() {
+            my $title = "{$!type.tc} #$!connection-number";
+            $title ~= " ($!name)" with $!name;
+            $title ~= " Player #$!num [{$!game.name}]" if $!type eq 'player';
+            $title;
+        }
 
-        method tell($message)     { $!conn.print("$message\n") }
-        method tell-error($error) { self.tell("!!! $error") }
-        method tell-ok($ok)       { self.tell("OK $ok") }
+        method says(Str:D() $message) returns Str:D { qq[$.title says, "$message"] }
+        method acts(Str:D() $message) returns Str:D { qq[$.title $message] }
 
-        method hello($name) {
-            with $.name {
-                self.tell-error('no more hellos');
+        method tell(Str:D() $message)     { $!conn.print("$message\n") }
+        method tell-error(Str:D() $error) { self.tell("!!! $error") }
+        method tell-ok(Str:D() $ok)       { self.tell("OK $ok") }
+
+        method hello(Str:D() $name) {
+            with $!name {
+                self.tell-error('no name changes');
             }
             else {
-                $.name = $name;
+                $!name = $name;
                 self.tell-ok('name set');
             }
         }
@@ -282,7 +294,7 @@ class Server {
 
         method leave() {
             $!game = Nil;
-            $!type = Nil;
+            $!type = 'client';
             $!num  = Nil;
         }
 
@@ -461,19 +473,19 @@ class Server {
         has $.server;
 
         method hello($/) {
-            $.server.hello($.client, $/<name>);
+            $.server.hello($.client, ~$/<name>);
         }
 
         method start-game($/) {
-            $.server.start-game($.client, $/<players>, $/<name>);
+            $.server.start-game($.client, ~$/<players>, ~$/<name>);
         }
 
         method join-game($/) {
-            $.server.join-game($.client, $/<number>, $/<name>);
+            $.server.join-game($.client, ~$/<number>, ~$/<name>);
         }
 
         method watch-game($/) {
-            $.server.watch-game($.client, $/<name>);
+            $.server.watch-game($.client, ~$/<name>);
         }
 
         method quit($/) {
@@ -563,11 +575,13 @@ class Server {
         }
     }
 
-    method hello($client, $name) {
+    method hello(Client:D $client, Str:D() $name) {
         if $!names ∋ $name {
             $client.tell-error('that name is taken');
             return;
         }
+
+        self.say($client.title ~ ": $name");
 
         $!names{ $name }++;
         $client.hello($name);
@@ -672,17 +686,31 @@ class Server {
 
     multi method client-exit(Player $watcher, Str :$error) {}
 
+    method say(Str $msg, Bool :$skip-nl) {
+        my $nl = $skip-nl ?? "" !! "\r";
+        say "$nl$msg";
+        print "> ";
+    }
+
     method run() {
         react {
-            my $server .= IO::Socket::Async.listen($!host, $!port);
-            whenever $server -> $conn {
+            my $server = IO::Socket::Async.listen($!host, $!port);
+            say "Listening on tcp://$!host:$!port ...";
+            print "> ";
+
+            whenever $server.Supply -> $conn {
                 my $this-client = Client.new;
-                my $client-msg = $conn.lines.map: -> $line {
+                self.say($this-client.title ~ ": New connection...");
+                my $client-msg = $conn.Supply.lines.map: -> $line {
                     ($this-client, $line);
                 };
 
                 whenever $client-msg -> ($client, $line) {
                     self.handle-message($client, $line);
+
+                    CATCH {
+                        default { .say; .throw }
+                    }
 
                     LAST { self.client-exit($client, :error<Disconnected.>) }
                     QUIT {
@@ -690,6 +718,21 @@ class Server {
                     }
                 }
             }
+
+            # whenever $*IN.Supply.lines {
+            #     when 'quit' | 'exit' {
+            #         say "Shutting down.";
+            #         $server.close;
+            #         $server.Supply.close;
+            #         done;
+            #     }
+            #     default {
+            #         self.say('Say what? (Type "exit" or "quit" to stop the server.)', :skip-nl);
+            #     }
+            # }
+
         }
     }
 }
+
+# vim: sts=4 ts=4 sw=4
