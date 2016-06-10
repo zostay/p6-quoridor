@@ -43,6 +43,10 @@ my class X::Game::Quoridor::WallCutsOff is X::Game::Quoridor::IllegalMove {
   method message() { callsame() ~ ": wall position will block a pawn from victory" }
 }
 
+my class X::Game::Quoridor::OutOfWalls is X::Game::Quoridor::IllegalMove {
+  method message() { callsame() ~ ": player is out of walls" }
+}
+
 subset SquarePosition of Str where /^ <[a .. i]> <[1 .. 9]> $/;
 subset WallPosition of Str where /^ <[a .. j]> <[1 .. 8]> <[h v]> $/;
 
@@ -114,12 +118,23 @@ my sub wall-blocks(WallPosition:D $w) is export {
   }
 }
 
+my sub timethis(&code, $name) {
+  my ($start, $stop);
+  ENTER { $start = now }
+  code();
+  LEAVE {
+    $stop = now;
+    say "$name took " ~ $stop - $start ~ " seconds.";
+  }
+}
+
 class Board {
   has $.players;
 
   has $.turn = 0;
   has SquarePosition @.pawns;
   has @.victory-squares;
+  has @.reserve-walls;
   has SetHash $.walls = SetHash.new;
 
   has SetHash %.blocked;
@@ -132,6 +147,7 @@ class Board {
       [ ('a' .. 'i') »~» '1' ],
       [ ('a' .. 'i') »~» '9' ],
     );
+    @!reserve-walls = 10, 10;
 
     if $!players == 4 {
       @!pawns.append: <i5 a5>;
@@ -139,6 +155,7 @@ class Board {
         [ 'a' «~« ('1' .. '9') ],
         [ 'i' «~« ('1' .. '9') ],
         ;
+      @!reserve-walls = 5, 5, 5, 5;
     }
 
     unless $!players ~~ 2|4 {
@@ -184,8 +201,10 @@ class Board {
       my @squares = $pawn => $pawn;
       my %distance;
 
-      while my $p = @squares.shift {
-        %distance{ $p.value } //= $p.value eq $pawn ?? 0 !! %distance{ $p.key } + 1;
+      my $iterations = 0;
+      SQUARE: while my $p = @squares.shift {
+        next SQUARE with %distance{ $p.value };
+        %distance{ $p.value } = $p.value eq $pawn ?? 0 !! %distance{ $p.key } + 1;
         @squares.append(
           self.real-neighbors($p.value, :exclude($pawn))
             .grep({ not %distance{ $_ }.defined })
@@ -270,6 +289,9 @@ class Board {
 
   multi method move(Game::Quoridor::Board:D: WallPosition $at) {
 
+    die X::Game::Quoridor::OutOfWalls.new
+      if @!reserve-walls[ $!turn ] <= 0;
+
     # A wall position may only be used once or walls in either direction overlap
     die X::Game::Quoridor::WallSlotOccupied.new
       if $.walls ∋ $at.subst(/.$/, 'v');
@@ -281,17 +303,17 @@ class Board {
     # Make sure horizontal walls don't half-overlap
     if $d eq 'h' {
       die X::Game::Quoridor::WallSlotOccupied.new
-        if $.walls ∋ [~] $c, $r + 1, $d;
+        if $.walls ∋ [~] $c a+ 1, $r, $d;
       die X::Game::Quoridor::WallSlotOccupied.new
-        if $.walls ∋ [~] $c, $r - 1, $d;
+        if $.walls ∋ [~] $c a- 1, $r, $d;
     }
 
     # Make sure vertical walls don't half-overlap
     else {
       die X::Game::Quoridor::WallSlotOccupied.new
-        if $.walls ∋ [~] $c a+ 1, $r, $d;
+        if $.walls ∋ [~] $c, $r + 1, $d;
       die X::Game::Quoridor::WallSlotOccupied.new
-        if $.walls ∋ [~] $c a- 1, $r, $d;
+        if $.walls ∋ [~] $c, $r - 1, $d;
     }
 
     # Move is possible, set the move and the blocks list
@@ -313,11 +335,8 @@ class Board {
     # don't properly account for all possible double hops.
 
     # Make sure each pawn has a reachable victory squore
-    my Bool @reachable = gather for @!distances.keys -> $i {
-      for @!victory-squares[$i] -> $sq {
-        # If there is a distance stored in a victory square, it can be reached
-        take True with @!distances[$i]{ $sq };
-      }
+    my Bool @reachable = do for @!distances.keys -> $i {
+      [||] @!victory-squares[$i].map: { @!distances[$i]{ $_ }.defined };
     }
 
     # That's illegal then, rollback and reject the move
@@ -332,6 +351,7 @@ class Board {
       die X::Game::Quoridor::WallCutsOff.new;
     }
 
+    @!reserve-walls[ $!turn ]--;
     self.next-turn;
   }
 
