@@ -100,7 +100,6 @@ my sub el-hops(SquarePosition:D $s) is export {
     ($a ~ $b + 1, $a a+ 1 ~ $b - 1, $a ~ $b - 2),
     ($a ~ $b + 1, $a a- 1 ~ $b - 1, $a ~ $b - 2),
   ).grep: { .[1] ~~ SquarePosition:D };
-
 }
 
 my sub wall-blocks(WallPosition:D $w) is export {
@@ -135,7 +134,7 @@ class Board {
   has SquarePosition @.pawns;
   has @.victory-squares;
   has @.reserve-walls;
-  has SetHash $.walls = SetHash.new;
+  has SetHash $.walls .= new;
 
   has SetHash %.blocked;
 
@@ -163,6 +162,17 @@ class Board {
     }
 
     self.calculate-distances;
+  }
+
+  method dupe() returns Board:D {
+    self.clone(
+      :pawns(@!pawns.clone),
+      :walls(SetHash.new($!walls.list)),
+      :reserve-walls(@!reserve-walls.clone),
+      :blocked(
+        %!blocked.pairs.map({ .key => .value.clone })
+      ),
+    );
   }
 
   method real-neighbors(SquarePosition:D $sq, Set() :$exclude) {
@@ -194,6 +204,15 @@ class Board {
         take $_;
       }
     }
+  }
+
+  method open-walls() {
+    set('a' .. 'h' X~ '1' .. '8' X~ 'h', 'v')
+      (-) $!walls
+      (-) $!walls.grep({ $_ ~~ /h$/ }).map({ .subst(/^(.)/, { $/[0] a+ 1 }) })
+      (-) $!walls.grep({ $_ ~~ /h$/ }).map({ .subst(/^(.)/, { $/[0] a- 1 }) })
+      (-) $!walls.grep({ $_ ~~ /v$/ }).map({ .subst(/^(\d)/, { $/[0] + 1 }) })
+      (-) $!walls.grep({ $_ ~~ /v$/ }).map({ .subst(/^(\d)/, { $/[0] - 1 }) })
   }
 
   method calculate-distances() {
@@ -240,7 +259,7 @@ class Board {
     elsif $delta > 1 {
 
       # Trying a straight hop?
-      with straight-hops($here).first({ .[1] eq $to }) {
+      if temp $_ = straight-hops($here).first({ .[1] eq $to }) {
 
         # There must be a pawn to hop
         die X::Game::Quoridor::IllegalHop.new
@@ -251,7 +270,8 @@ class Board {
           if %!blocked{$here}{ .[0] } or %!blocked{ .[0] }{ .[1] };
       }
 
-      orwith el-hops($here).grep({ .[1] eq $to && .[0] ~~ any(|@!pawns) }) {
+      elsif temp $_ = el-hops($here).grep({ .[1] eq $to && .[0] ~~ any(|@!pawns) }) {
+        dd $_;
         # There must not be a wall blocking the hop
         die X::Game::Quoridor::BlockedBy.new(:what<wall>)
           if %!blocked{$here}{ .[0] } or %!blocked{ .[0] }{ .[1] };
