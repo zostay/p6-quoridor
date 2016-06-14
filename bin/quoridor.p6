@@ -29,5 +29,9 @@ loop {
         }
     }
 
+    last with $b.winner;
+
     NEXT { ''.say }
 }
+
+say "Player #{$b.winner} wins!";

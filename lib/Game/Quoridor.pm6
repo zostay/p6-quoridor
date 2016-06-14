@@ -14,6 +14,10 @@ my class X::Game::Quoridor::WrongNumberOfPlayers is X::Game::Quoridor::GameError
 my class X::Game::Quoridor::PlayerMistake is X::Game::Quoridor {
 }
 
+my class X::Game::Quoridor::GameOver is X::Game::Quoridor::PlayerMistake {
+    method message() { "game over" }
+}
+
 my class X::Game::Quoridor::IllegalMove is X::Game::Quoridor::PlayerMistake {
     method message() { "illegal move" }
 }
@@ -58,8 +62,8 @@ my sub infix:<delta>(SquarePosition:D $from, SquarePosition:D $to) returns Int:D
     [+] ($from_c.list Z- $to_c.list).map: *.abs;
 }
 
-my sub infix:<a+>(Str:D $x where any('a' .. 'i'), Int:D $y) is equiv(&infix:<+>) is export { ($x.ord + $y).chr }
-my sub infix:<a->(Str:D $x where any('a' .. 'i'), Int:D $y) is equiv(&infix:<->) is export { ($x.ord - $y).chr }
+my sub infix:<a+>(Str:D() $x where any('a' .. 'i'), Int:D $y) is equiv(&infix:<+>) is export { ($x.ord + $y).chr }
+my sub infix:<a->(Str:D() $x where any('a' .. 'i'), Int:D $y) is equiv(&infix:<->) is export { ($x.ord - $y).chr }
 
 my sub infix:<xy->(SquarePosition:D $from, SquarePosition:D $to) is equiv(&infix:<->) is export {
     my ($from_c, $to_c) = ($from, $to).map: { [.comb.map({ to-num($_) }) ]};
@@ -140,6 +144,8 @@ class Board {
 
     has @.distances;
 
+    has Int $.winner;
+
     submethod BUILD(:$!players = 2) {
         @!pawns = <e9 e1>;
         @!victory-squares = (
@@ -167,18 +173,23 @@ class Board {
     method dupe() returns Board:D {
         self.clone(
             :pawns(@!pawns.clone),
-            :walls(SetHash.new($!walls.list)),
+            :walls(SetHash.new($!walls.keys)),
             :reserve-walls(@!reserve-walls.clone),
             :blocked(
-                %!blocked.pairs.map({ .key => .value.clone })
+                %!blocked.list.map({
+                    .key => SetHash.new( .value.keys )
+                })
             ),
         );
     }
 
-    method real-neighbors(SquarePosition:D $sq, Set() :$exclude) {
+    method real-neighbors(SquarePosition:D $sq, Set() :$exclude, :$include-opponents-of) {
         gather for neighbors($sq).grep({ not %!blocked{ $sq }{ $_ } }) {
             when $exclude { next }
             when any(|@!pawns) {
+                take $_ if $include-opponents-of.defined
+                        && @!pawns[ $include-opponents-of ] ne $_;
+
                 my $vec = $_ xy- $sq;
                 my $hop = $_ xy+ $vec;
 
@@ -208,11 +219,11 @@ class Board {
 
     method open-walls() {
         set('a' .. 'h' X~ '1' .. '8' X~ 'h', 'v')
-        (-) $!walls
-        (-) $!walls.grep({ $_ ~~ /h$/ }).map({ .subst(/^(.)/, { $/[0] a+ 1 }) })
-        (-) $!walls.grep({ $_ ~~ /h$/ }).map({ .subst(/^(.)/, { $/[0] a- 1 }) })
-        (-) $!walls.grep({ $_ ~~ /v$/ }).map({ .subst(/^(\d)/, { $/[0] + 1 }) })
-        (-) $!walls.grep({ $_ ~~ /v$/ }).map({ .subst(/^(\d)/, { $/[0] - 1 }) })
+            (-) $!walls
+            (-) $!walls.keys.grep(/h$/).map({ .subst(/^(.)/, { ~.[0] a+ 1 }) })
+            (-) $!walls.keys.grep(/h$/).map({ .subst(/^(.)/, { ~.[0] a- 1 }) })
+            (-) $!walls.keys.grep(/v$/).map({ .subst(/^(\d)/, { ~.[0] + 1 }) })
+            (-) $!walls.keys.grep(/v$/).map({ .subst(/^(\d)/, { ~.[0] - 1 }) })
     }
 
     method calculate-distances() {
@@ -225,12 +236,15 @@ class Board {
                 next SQUARE with %distance{ $p.value };
                 %distance{ $p.value } = $p.value eq $pawn ?? 0 !! %distance{ $p.key } + 1;
                 @squares.append(
-                    self.real-neighbors($p.value, :exclude($pawn))
-                    .grep({ not %distance{ $_ }.defined })
-                    .map({ $p.value => $_ })
+                    self.real-neighbors($p.value,
+                        :exclude($pawn),
+                        :include-opponents-of($i)
+                    ).grep({ not %distance{ $_ }.defined })
+                     .map({ $p.value => $_ })
                 );
             }
 
+            #dd %distance;
             @!distances[$i] = %distance;
         }
     }
@@ -243,7 +257,8 @@ class Board {
         $!turn = ($!turn + 1) % $!players;
     }
 
-    multi method move(Game::Quoridor::Board:D: SquarePosition $to) {
+    multi method move(Board:D: SquarePosition $to) {
+        die X::Game::Quoridor::GameOver.new with $!winner;
         die X::Game::Quoridor::SquareOccupied.new if $to ~~ any(|@!pawns);
 
         my $here := @!pawns[ $!turn ];
@@ -263,22 +278,22 @@ class Board {
 
                 # There must be a pawn to hop
                 die X::Game::Quoridor::IllegalHop.new
-                unless .[0] ~~ any(|@!pawns);
+                    unless .[0] ~~ any(|@!pawns);
 
                 # There must not be a wall blocking the hop
                 die X::Game::Quoridor::BlockedBy.new(:what<wall>)
-                if %!blocked{$here}{ .[0] } or %!blocked{ .[0] }{ .[1] };
+                    if %!blocked{$here}{ .[0] } or %!blocked{ .[0] }{ .[1] };
             }
 
             elsif temp $_ = el-hops($here).grep({ .[1] eq $to && .[0] ~~ any(|@!pawns) }) {
                 dd $_;
                 # There must not be a wall blocking the hop
                 die X::Game::Quoridor::BlockedBy.new(:what<wall>)
-                if %!blocked{$here}{ .[0] } or %!blocked{ .[0] }{ .[1] };
+                    if %!blocked{$here}{ .[0] } or %!blocked{ .[0] }{ .[1] };
 
                 # There must be a wall or edge blocking a straight hop
                 die X::Game::Quoridor::IllegalHop.new
-                unless .[2] !~~ SquarePosition or %!blocked{ .[0] }{ .[2] };
+                    unless .[2] !~~ SquarePosition or %!blocked{ .[0] }{ .[2] };
             }
 
             # A hop too far
@@ -295,45 +310,52 @@ class Board {
 
             # Can't be blocked
             die X::Game::Quoridor::BlockedBy.new(:what<wall>)
-            if %!blocked{$here}{$to};
+                if %!blocked{$here}{$to};
 
             # Can't move onto another pawn
             die X::Game::Quoridor::BlockedBy.new(:what<pawn>)
-            if $to eq any(|@!pawns);
+                if $to eq any(|@!pawns);
         }
 
         $here = $to;
+
+        if $here ~~ any(|@!victory-squares[ $!turn ]) {
+            $!winner = $!turn + 1;
+            return;
+        }
+
         self.calculate-distances;
         self.next-turn;
     }
 
-    multi method move(Game::Quoridor::Board:D: WallPosition $at) {
+    multi method move(Board:D: WallPosition $at) {
 
+        die X::Game::Quoridor::GameOver.new with $!winner;
         die X::Game::Quoridor::OutOfWalls.new
-        if @!reserve-walls[ $!turn ] <= 0;
+            if @!reserve-walls[ $!turn ] <= 0;
 
         # A wall position may only be used once or walls in either direction overlap
         die X::Game::Quoridor::WallSlotOccupied.new
-        if $.walls ∋ $at.subst(/.$/, 'v');
+            if $.walls ∋ $at.subst(/.$/, 'v');
         die X::Game::Quoridor::WallSlotOccupied.new
-        if $.walls ∋ $at.subst(/.$/, 'h');
+            if $.walls ∋ $at.subst(/.$/, 'h');
 
         my ($c, $r, $d) = $at.comb;
 
         # Make sure horizontal walls don't half-overlap
         if $d eq 'h' {
             die X::Game::Quoridor::WallSlotOccupied.new
-            if $.walls ∋ [~] $c a+ 1, $r, $d;
+                if $.walls ∋ [~] $c a+ 1, $r, $d;
             die X::Game::Quoridor::WallSlotOccupied.new
-            if $.walls ∋ [~] $c a- 1, $r, $d;
+                if $.walls ∋ [~] $c a- 1, $r, $d;
         }
 
         # Make sure vertical walls don't half-overlap
         else {
             die X::Game::Quoridor::WallSlotOccupied.new
-            if $.walls ∋ [~] $c, $r + 1, $d;
+                if $.walls ∋ [~] $c, $r + 1, $d;
             die X::Game::Quoridor::WallSlotOccupied.new
-            if $.walls ∋ [~] $c, $r - 1, $d;
+                if $.walls ∋ [~] $c, $r - 1, $d;
         }
 
         # Move is possible, set the move and the blocks list
